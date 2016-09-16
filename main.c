@@ -6,6 +6,38 @@
 
 #include "mpc.h"
 
+long
+EvalOperator(long A, char *Operator, long B)
+{
+        if(strcmp(Operator, "+") == 0) { return A + B; }
+        if(strcmp(Operator, "-") == 0) { return A - B; }
+        if(strcmp(Operator, "*") == 0) { return A * B; }
+        if(strcmp(Operator, "/") == 0) { return A / B; }
+        return(0);
+}
+
+long
+Eval(mpc_ast_t *Tree)
+{
+        if(strstr(Tree->tag, "number"))
+        {
+                return(atoi(Tree->contents));
+        }
+
+        char *Operator = Tree->children[1]->contents;
+
+        long Parameter = Eval(Tree->children[2]);
+
+        int i = 3;
+        while(strstr(Tree->children[i]->tag, "expr"))
+        {
+                Parameter = EvalOperator(Parameter, Operator, Eval(Tree->children[i]));
+                i++;
+        }
+
+        return(Parameter);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -35,7 +67,8 @@ main(int argc, char *argv[])
                 add_history(input);
                 if(mpc_parse("<stdin>", input, Lispy, &r))
                 {
-                        mpc_ast_print(r.output);
+                        long Result = Eval(r.output);
+                        printf("%li\n", Result);
                         mpc_ast_delete(r.output);
                 }
                 else
