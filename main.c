@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <alloca.h>
 
 #include <editline/readline.h>
 #include <editline/history.h>
 
+#include "gs.h"
 #include "mpc.h"
 
 long
@@ -38,23 +40,34 @@ Eval(mpc_ast_t *Tree)
         return(Parameter);
 }
 
-int
-main(int argc, char *argv[])
+void
+Usage(char *ProgramName)
 {
+        printf("Usage: %s mpc_file\n\n", ProgramName);
+        puts("Reads mpc_file and launches a repl to interactively test the generated parser.");
+        exit(EXIT_SUCCESS);
+}
+
+int
+main(int ArgCount, char *Arguments[])
+{
+        gs_args *Args = alloca(sizeof(gs_args));
+        GSArgsInit(Args, ArgCount, Arguments);
+        if(GSArgsHelpWanted(Args) || ArgCount < 2) Usage(GSArgsProgramName(Args));
+
+        char *GrammarFile = GSArgsAtIndex(Args, 1);
+
         mpc_parser_t *Number   = mpc_new("number");
         mpc_parser_t *Operator = mpc_new("operator");
         mpc_parser_t *Expr     = mpc_new("expr");
         mpc_parser_t *Lispy    = mpc_new("lispy");
 
-        mpca_lang(MPCA_LANG_DEFAULT,
-                  "                                                   \
-                   number   : /-?[0-9]+/ ;                            \
-                   operator : '+' | '-' | '*' | '/' ;                 \
-                   expr     : <number> | '(' <operator> <expr>+ ')' ; \
-                   lispy    : /^/ <operator> <expr>+ /$/ ;            \
-                  ",
-                  Number, Operator, Expr, Lispy);
+        size_t FileSize = GSFileSize(GrammarFile);
+        gs_buffer *FileBuffer = alloca(sizeof(gs_buffer));
+        GSBufferInit(FileBuffer, malloc(FileSize), FileSize);
+        GSFileCopyToBuffer(GrammarFile, FileBuffer);
 
+        mpca_lang(MPCA_LANG_DEFAULT, FileBuffer->Start, Number, Operator, Expr, Lispy);
 
         puts("Lispy Version 0.0.1");
         puts("Press Ctrl+c to exit\n");
