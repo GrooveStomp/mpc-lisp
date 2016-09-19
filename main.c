@@ -8,17 +8,22 @@
 #include "gs.h"
 #include "mpc.h"
 
-typedef struct
+typedef struct lval
 {
         int Type;
-        int Number;
-        int Error;
+        long Number;
+        char *Error;
+        char *Symbol;
+        unsigned int CellCount;
+        struct lval **Cell;
 } lval;
 
 enum lval_type_e
 {
         LVAL_TYPE_NUMBER,
-        LVAL_TYPE_ERROR
+        LVAL_TYPE_ERROR,
+        LVAL_TYPE_SYMBOL,
+        LVAL_TYPE_SEXPRESSION
 };
 
 enum lval_error_e
@@ -28,92 +33,336 @@ enum lval_error_e
         LVAL_ERROR_BAD_NUMBER
 };
 
-lval
+lval *
 LvalNumber(long Number)
 {
-        lval Result;
-        Result.Type = LVAL_TYPE_NUMBER;
-        Result.Number = Number;
-        return(Result);
+        lval *Self = malloc(sizeof(lval));
+        Self->Type = LVAL_TYPE_NUMBER;
+        Self->Number = Number;
+        return(Self);
 }
 
-lval
-LvalError(int Error)
+lval *
+LvalError(char *Error)
 {
-        lval Result;
-        Result.Type = LVAL_TYPE_ERROR;
-        Result.Error = Error;
-        return(Result);
+        unsigned int StringLength = GSStringLength(Error);
+
+        lval *Self = malloc(sizeof(lval));
+        Self->Type = LVAL_TYPE_ERROR;
+        Self->Error = malloc(StringLength + 1);
+        GSStringCopy(Error, Self->Error, StringLength);
+        return(Self);
+}
+
+lval *
+LvalSymbol(char *Symbol)
+{
+        unsigned int StringLength = GSStringLength(Symbol);
+
+        lval *Self = malloc(sizeof(lval));
+        Self->Type = LVAL_TYPE_SYMBOL;
+        Self->Symbol = malloc(StringLength + 1);
+        GSStringCopy(Symbol, Self->Symbol, StringLength);
+        return(Self);
+}
+
+lval *
+LvalSExpression()
+{
+        lval *Self = malloc(sizeof(lval));
+        Self->Type = LVAL_TYPE_SEXPRESSION;
+        Self->CellCount = 0;
+        Self->Cell = GSNullPtr;
+        return(Self);
 }
 
 void
-LvalPrint(lval Value)
+LvalFree(lval *Self)
 {
-        switch(Value.Type)
+        switch(Self->Type)
         {
-                case(LVAL_TYPE_NUMBER):
+                case LVAL_TYPE_NUMBER: break;
+                case LVAL_TYPE_ERROR:
                 {
-                        printf("%i", Value.Number);
+                        free(Self->Error);
                 } break;
-                case(LVAL_TYPE_ERROR):
+                case LVAL_TYPE_SYMBOL:
                 {
-                        switch(Value.Error)
+                        free(Self->Symbol);
+                } break;
+                case LVAL_TYPE_SEXPRESSION:
+                {
+                        for(int I = 0; I < Self->CellCount; I++)
                         {
-                                case(LVAL_ERROR_DIV_ZERO):
-                                {
-                                        printf("Error: Division By Zero!");
-                                } break;
-                                case(LVAL_ERROR_BAD_OPERATOR):
-                                {
-                                        printf("Error: Invalid Operator!");
-                                } break;
-                                case(LVAL_ERROR_BAD_NUMBER):
-                                {
-                                        printf("Error: Invalid Number!");
-                                } break;
+                                LvalFree(Self->Cell[I]);
                         }
+                        free(Self->Cell);
                 } break;
+        }
+        free(Self);
+}
+
+lval *
+LvalReadNumber(mpc_ast_t *Tree)
+{
+        lval *Result;
+
+        errno = 0;
+        long Number = strtol(Tree->contents, NULL, 10);
+        if(errno == ERANGE)
+        {
+                Result = LvalError("Invalid Number");
+        }
+        else
+        {
+                Result = LvalNumber(Number);
+        }
+        return(Result);
+}
+
+lval *
+LvalAdd(lval *Self, lval *ToAdd)
+{
+        Self->CellCount++;
+        Self->Cell = realloc(Self->Cell, sizeof(lval *) * Self->CellCount);
+        Self->Cell[Self->CellCount-1] = ToAdd;
+        return(Self);
+}
+
+lval *
+LvalRead(mpc_ast_t *Tree)
+{
+        lval *Result = GSNullPtr;
+
+        if(strstr(Tree->tag, "number")) return(LvalReadNumber(Tree));
+        if(strstr(Tree->tag, "symbol")) return(LvalSymbol(Tree->contents));
+
+        if(GSStringIsEqual(Tree->tag, ">", 1)) Result = LvalSExpression();
+        if(strstr(Tree->tag, "sexpr"))         Result = LvalSExpression();
+
+        for(int I=0; I<Tree->children_num; I++)
+        {
+                if(GSStringIsEqual(Tree->children[I]->contents, "(", 1)) continue;
+                if(GSStringIsEqual(Tree->children[I]->contents, ")", 1)) continue;
+                if(GSStringIsEqual(Tree->children[I]->contents, "}", 1)) continue;
+                if(GSStringIsEqual(Tree->children[I]->contents, "{", 1)) continue;
+                if(GSStringIsEqual(Tree->children[I]->tag, "regex", 5)) continue;
+                Result = LvalAdd(Result, LvalRead(Tree->children[I]));
+        }
+
+        return(Result);
+}
+
+void LvalPrint(lval *Value);
+
+void
+LvalPrintExpression(lval *Self, char Open, char Close)
+{
+        putchar(Open);
+
+        for(int I=0; I < Self->CellCount; I++)
+        {
+                LvalPrint(Self->Cell[I]);
+
+                if(I != (Self->CellCount - 1))
+                {
+                        putchar(' ');
+                }
+        }
+
+        putchar(Close);
+}
+
+void
+LvalPrint(lval *Self)
+{
+        switch(Self->Type)
+        {
+                case(LVAL_TYPE_NUMBER):      printf("%li", Self->Number);         break;
+                case(LVAL_TYPE_ERROR):       printf("Error: %s", Self->Error);    break;
+                case(LVAL_TYPE_SYMBOL):      printf("%s", Self->Symbol);          break;
+                case(LVAL_TYPE_SEXPRESSION): LvalPrintExpression(Self, '(', ')'); break;
         }
 }
 
 void
-LvalPrintln(lval Value)
+LvalPrintLine(lval *Self)
 {
-        LvalPrint(Value); putchar('\n');
+        LvalPrint(Self);
+        putchar('\n');
 }
 
-lval
-EvalOperator(lval A, char *Operator, lval B)
+lval *
+LvalPop(lval *Self, unsigned int Index)
 {
-        lval Result;
+        lval *Result = Self->Cell[Index];
 
-        if(A.Type == LVAL_TYPE_ERROR) { return(A); }
-        if(B.Type == LVAL_TYPE_ERROR) { return(B); }
+        memmove(&(Self->Cell[Index]), &(Self->Cell[Index + 1]),
+                sizeof(lval *) * Self->CellCount - Index - 1);
 
-        if(strcmp(Operator, "+") == 0) { return(LvalNumber(A.Number + B.Number)); }
-        if(strcmp(Operator, "-") == 0) { return(LvalNumber(A.Number - B.Number)); }
-        if(strcmp(Operator, "*") == 0) { return(LvalNumber(A.Number * B.Number)); }
-        if(strcmp(Operator, "/") == 0) {
-                if(B.Number == 0)
+        Self->CellCount--;
+
+        Self->Cell = realloc(Self->Cell, sizeof(lval *) * Self->CellCount);
+        return(Result);
+}
+
+lval *
+LvalTake(lval *Self, unsigned int Index)
+{
+        lval *Result = LvalPop(Self, Index);
+        LvalFree(Self);
+        return(Result);
+}
+
+lval *
+LvalBuiltInOperator(lval *Self, char *Operator)
+{
+        lval *Result = GSNullPtr;
+
+        for(int Cell = 0; Cell < Self->CellCount; Cell++)
+        {
+                if(Self->Cell[Cell]->Type != LVAL_TYPE_NUMBER)
+                {
+                        LvalFree(Self);
+                        Result = LvalError("Cannot operate on non-number");
+                        return(Result);
+                }
+        }
+
+        Result = LvalPop(Self, 0);
+
+        if(GSStringIsEqual(Operator, "-", 1) && Self->CellCount == 0)
+        {
+                Result->Number = -(Result->Number);
+        }
+
+        while(Self->CellCount > 0)
+        {
+                lval *Foo = LvalPop(Self, 0);
+
+                if(GSStringIsEqual(Operator, "+", 1))
+                        Result->Number += Foo->Number;
+                if(GSStringIsEqual(Operator, "-", 1))
+                        Result->Number -= Foo->Number;
+                if(GSStringIsEqual(Operator, "*", 1))
+                        Result->Number *= Foo->Number;
+                if(GSStringIsEqual(Operator, "/", 1))
+                {
+                        if(Foo->Number == 0)
+                        {
+                                LvalFree(Self);
+                                LvalFree(Foo);
+                                Result = LvalError("Division by zero!");
+                                break;
+                        }
+                        Result->Number /= Foo->Number;
+                }
+
+                LvalFree(Foo);
+        }
+
+        LvalFree(Self);
+        return(Result);
+}
+
+lval *LvalEval(lval *Self);
+
+lval *
+LvalEvalSExpression(lval *Self)
+{
+        lval *Result = GSNullPtr;
+
+        /* Evaluate all children. */
+        for(int Cell = 0; Cell < Self->CellCount; Cell++)
+        {
+                Self->Cell[Cell] = LvalEval(Self->Cell[Cell]);
+        }
+
+        /* Check for errors. */
+        for(int Cell = 0; Cell < Self->CellCount; Cell++)
+        {
+                if(Self->Cell[Cell]->Type == LVAL_TYPE_ERROR)
+                {
+                        Result = LvalTake(Self, Cell);
+                        return(Result);
+                }
+        }
+
+        /* Empty S-Expression. */
+        if(Self->CellCount == 0) return(Self);
+
+        /* Single element in S-Expression; ie., Single Expression. */
+        if(Self->CellCount == 1)
+        {
+                Result = LvalTake(Self, 0);
+                return(Result);
+        }
+
+        /* Ensure first element is a symbol. */
+        lval *FirstElement = LvalPop(Self, 0);
+        if(FirstElement->Type != LVAL_TYPE_SYMBOL)
+        {
+                LvalFree(FirstElement);
+                LvalFree(Self);
+                Result = LvalError("S-Expression does not start with a symbol!");
+                return(Result);
+        }
+
+        Result = LvalBuiltInOperator(Self, FirstElement->Symbol);
+        LvalFree(FirstElement);
+        return(Result);
+}
+
+lval *
+LvalEval(lval *Self)
+{
+        lval *Result = GSNullPtr;
+
+        if(Self->Type == LVAL_TYPE_SEXPRESSION)
+        {
+                Result = LvalEvalSExpression(Self);
+        }
+        else
+        {
+                Result = Self;
+        }
+
+        return(Result);
+}
+
+lval *
+EvalOperator(lval *A, char *Operator, lval *B)
+{
+        lval *Result;
+
+        if(A->Type == LVAL_TYPE_ERROR) { return(A); }
+        if(B->Type == LVAL_TYPE_ERROR) { return(B); }
+
+        if(GSStringIsEqual(Operator, "+", 1)) { return(LvalNumber(A->Number + B->Number)); }
+        if(GSStringIsEqual(Operator, "-", 1)) { return(LvalNumber(A->Number - B->Number)); }
+        if(GSStringIsEqual(Operator, "*", 1)) { return(LvalNumber(A->Number * B->Number)); }
+        if(GSStringIsEqual(Operator, "/", 1))
+        {
+                if(B->Number == 0)
                 {
                         Result = LvalError(LVAL_ERROR_DIV_ZERO);
                         return(Result);
                 }
                 else
                 {
-                        Result = LvalNumber(A.Number / B.Number);
+                        Result = LvalNumber(A->Number / B->Number);
                         return(Result);
                 }
         }
 
-        Result = LvalError(LVAL_ERROR_BAD_OPERATOR);
+        Result = LvalError("Unknown Operator");
         return(Result);
 }
 
-lval
+lval *
 Eval(mpc_ast_t *Tree)
 {
-        lval Result;
+        lval *Result;
 
         if(strstr(Tree->tag, "number"))
         {
@@ -121,7 +370,7 @@ Eval(mpc_ast_t *Tree)
                 long Number = strtol(Tree->contents, NULL, 10);
                 if(errno == ERANGE)
                 {
-                        Result = LvalError(LVAL_ERROR_BAD_NUMBER);
+                        Result = LvalError("Number too large");
                 }
                 else
                 {
@@ -132,7 +381,7 @@ Eval(mpc_ast_t *Tree)
         }
 
         char *Operator = Tree->children[1]->contents;
-        lval Parameter = Eval(Tree->children[2]);
+        lval *Parameter = Eval(Tree->children[2]);
 
         int i = 3;
         while(strstr(Tree->children[i]->tag, "expr"))
@@ -161,42 +410,47 @@ main(int ArgCount, char *Arguments[])
 
         char *GrammarFile = GSArgsAtIndex(Args, 1);
 
-        mpc_parser_t *Number   = mpc_new("number");
-        mpc_parser_t *Operator = mpc_new("operator");
-        mpc_parser_t *Expr     = mpc_new("expr");
-        mpc_parser_t *Lispy    = mpc_new("lispy");
+        mpc_parser_t *Number = mpc_new("number");
+        mpc_parser_t *Symbol = mpc_new("symbol");
+        mpc_parser_t *Sexpr  = mpc_new("sexpr");
+        mpc_parser_t *Expr   = mpc_new("expr");
+        mpc_parser_t *Lispy  = mpc_new("lispy");
 
         size_t FileSize = GSFileSize(GrammarFile);
         gs_buffer *FileBuffer = alloca(sizeof(gs_buffer));
         GSBufferInit(FileBuffer, malloc(FileSize), FileSize);
         GSFileCopyToBuffer(GrammarFile, FileBuffer);
 
-        mpca_lang(MPCA_LANG_DEFAULT, FileBuffer->Start, Number, Operator, Expr, Lispy);
+        mpca_lang(MPCA_LANG_DEFAULT,
+                  FileBuffer->Start,
+                  Number, Symbol, Sexpr, Expr, Lispy);
 
         puts("Lispy Version 0.0.1");
         puts("Press Ctrl+c to exit\n");
 
-        mpc_result_t r;
+        mpc_result_t *MpcResult = alloca(sizeof(mpc_result_t));
 
         while(true)
         {
                 char *Input = readline("lispy> ");
                 add_history(Input);
-                if(mpc_parse("<stdin>", Input, Lispy, &r))
+                if(mpc_parse("<stdin>", Input, Lispy, MpcResult))
                 {
-                        lval Result = Eval(r.output);
-                        LvalPrintln(Result);
-                        mpc_ast_delete(r.output);
+                        lval *Result = LvalRead(MpcResult->output);
+                        Result = LvalEval(Result);
+                        LvalPrintLine(Result);
+                        LvalFree(Result);
+                        mpc_ast_delete(MpcResult->output);
                 }
                 else
                 {
-                        mpc_err_print(r.error);
-                        mpc_err_delete(r.error);
+                        mpc_err_print(MpcResult->error);
+                        mpc_err_delete(MpcResult->error);
                 }
                 free(Input);
         }
 
-        mpc_cleanup(4, Number, Operator, Expr, Lispy);
+        mpc_cleanup(4, Number, Symbol, Sexpr, Expr, Lispy);
 
         return(0);
 }

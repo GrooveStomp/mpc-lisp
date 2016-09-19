@@ -1,0 +1,5 @@
+number   : /-?[0-9]+/ ;
+symbol   : '+' | '-' | '*' | '/' ;
+sexpr    : '(' <expr>* ')' ;
+expr     : <number> | <symbol> | <sexpr> ;
+lispy    : /^/ <expr>* /$/ ;
