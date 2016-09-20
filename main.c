@@ -8,6 +8,13 @@
 #include "gs.h"
 #include "mpc.h"
 
+#define LASSERT(Args, Condition, Error) \
+        if(!(Condition)) \
+        { \
+                LvalFree(Args); \
+                return(LvalError(Error)); \
+        }
+
 typedef struct lval
 {
         int Type;
@@ -23,7 +30,8 @@ enum lval_type_e
         LVAL_TYPE_NUMBER,
         LVAL_TYPE_ERROR,
         LVAL_TYPE_SYMBOL,
-        LVAL_TYPE_SEXPRESSION
+        LVAL_TYPE_SEXPRESSION,
+        LVAL_TYPE_QEXPRESSION
 };
 
 enum lval_error_e
@@ -76,6 +84,16 @@ LvalSExpression()
         return(Self);
 }
 
+lval *
+LvalQExpression()
+{
+        lval *Self = malloc(sizeof(lval));
+        Self->Type = LVAL_TYPE_QEXPRESSION;
+        Self->CellCount = 0;
+        Self->Cell = GSNullPtr;
+        return(Self);
+}
+
 void
 LvalFree(lval *Self)
 {
@@ -90,6 +108,7 @@ LvalFree(lval *Self)
                 {
                         free(Self->Symbol);
                 } break;
+                case LVAL_TYPE_QEXPRESSION:
                 case LVAL_TYPE_SEXPRESSION:
                 {
                         for(int I = 0; I < Self->CellCount; I++)
@@ -139,6 +158,7 @@ LvalRead(mpc_ast_t *Tree)
 
         if(GSStringIsEqual(Tree->tag, ">", 1)) Result = LvalSExpression();
         if(strstr(Tree->tag, "sexpr"))         Result = LvalSExpression();
+        if(strstr(Tree->tag, "qexpr"))         Result = LvalQExpression();
 
         for(int I=0; I<Tree->children_num; I++)
         {
@@ -182,6 +202,7 @@ LvalPrint(lval *Self)
                 case(LVAL_TYPE_ERROR):       printf("Error: %s", Self->Error);    break;
                 case(LVAL_TYPE_SYMBOL):      printf("%s", Self->Symbol);          break;
                 case(LVAL_TYPE_SEXPRESSION): LvalPrintExpression(Self, '(', ')'); break;
+                case(LVAL_TYPE_QEXPRESSION): LvalPrintExpression(Self, '{', '}'); break;
         }
 }
 
@@ -198,7 +219,7 @@ LvalPop(lval *Self, unsigned int Index)
         lval *Result = Self->Cell[Index];
 
         memmove(&(Self->Cell[Index]), &(Self->Cell[Index + 1]),
-                sizeof(lval *) * Self->CellCount - Index - 1);
+                sizeof(lval *) * (Self->CellCount - Index - 1));
 
         Self->CellCount--;
 
@@ -265,7 +286,109 @@ LvalBuiltInOperator(lval *Self, char *Operator)
         return(Result);
 }
 
+lval *
+LvalBuiltInHead(lval *Self)
+{
+        LASSERT(Self, Self->CellCount == 1,
+                "Function 'head' passed too many arguments!");
+        LASSERT(Self, Self->Cell[0]->Type == LVAL_TYPE_QEXPRESSION,
+                "Function 'head' passed incorrect type!");
+        LASSERT(Self, Self->Cell[0]->CellCount != 0,
+                "Function 'head' passed {}!");
+
+        lval *Result = LvalTake(Self, 0);
+        while(Result->CellCount > 1)
+        {
+                LvalFree(LvalPop(Result, 1));
+        }
+
+        return(Result);
+}
+
+lval *
+LvalBuiltInTail(lval *Self)
+{
+        LASSERT(Self, Self->CellCount == 1,
+                "Function 'tail' passed too many arguments!");
+        LASSERT(Self, Self->Cell[0]->Type == LVAL_TYPE_QEXPRESSION,
+                "Function 'tail' passed incorrect type!");
+        LASSERT(Self, Self->Cell[0]->CellCount != 0,
+                "Function 'tail' passed {}!");
+
+        lval *Result = LvalTake(Self, 0);
+        LvalFree(LvalPop(Result, 0));
+        return(Result);
+}
+
+lval *
+LvalBuiltInList(lval *Self)
+{
+        Self->Type = LVAL_TYPE_QEXPRESSION;
+        return(Self);
+}
+
 lval *LvalEval(lval *Self);
+
+lval *
+LvalBuiltInEval(lval *Self)
+{
+        LASSERT(Self, Self->CellCount == 1,
+                "Function 'eval' passed too many arguments!");
+        LASSERT(Self, Self->Cell[0]->Type == LVAL_TYPE_QEXPRESSION,
+                "Function 'eval' passed incorrect type!");
+
+        lval *Result = LvalTake(Self, 0);
+        Result->Type = LVAL_TYPE_SEXPRESSION;
+        return(LvalEval(Result));
+}
+
+lval *
+LvalJoin(lval *Left, lval *Right)
+{
+        while(Right->CellCount)
+        {
+                Left = LvalAdd(Left, LvalPop(Right, 0));
+        }
+
+        LvalFree(Right);
+        return(Left);
+}
+
+lval *
+LvalBuiltInJoin(lval *Self)
+{
+        for(int Cell = 0; Cell < Self->CellCount; Cell++)
+        {
+                LASSERT(Self, Self->Cell[Cell]->Type == LVAL_TYPE_QEXPRESSION,
+                        "Function 'join' passed incorrect type!");
+        }
+
+        lval *Result = LvalPop(Self, 0);
+
+        while(Self->CellCount)
+        {
+                Result = LvalJoin(Result, LvalPop(Self, 0));
+        }
+
+        LvalFree(Self);
+        return(Result);
+}
+
+lval *
+LvalBuiltIn(lval *Self, char *Function)
+{
+        if(GSStringIsEqual(Function, "list", 4)) return(LvalBuiltInList(Self));
+        if(GSStringIsEqual(Function, "head", 4)) return(LvalBuiltInHead(Self));
+        if(GSStringIsEqual(Function, "tail", 4)) return(LvalBuiltInTail(Self));
+        if(GSStringIsEqual(Function, "join", 4)) return(LvalBuiltInJoin(Self));
+        if(GSStringIsEqual(Function, "eval", 4)) return(LvalBuiltInEval(Self));
+        if(strstr("+-/*", Function)) return(LvalBuiltInOperator(Self, Function));
+
+        LvalFree(Self);
+
+        lval *Result = LvalError("Unknown Function!");
+        return(Result);
+}
 
 lval *
 LvalEvalSExpression(lval *Self)
@@ -308,7 +431,7 @@ LvalEvalSExpression(lval *Self)
                 return(Result);
         }
 
-        Result = LvalBuiltInOperator(Self, FirstElement->Symbol);
+        Result = LvalBuiltIn(Self, FirstElement->Symbol);
         LvalFree(FirstElement);
         return(Result);
 }
@@ -413,6 +536,7 @@ main(int ArgCount, char *Arguments[])
         mpc_parser_t *Number = mpc_new("number");
         mpc_parser_t *Symbol = mpc_new("symbol");
         mpc_parser_t *Sexpr  = mpc_new("sexpr");
+        mpc_parser_t *Qexpr  = mpc_new("qexpr");
         mpc_parser_t *Expr   = mpc_new("expr");
         mpc_parser_t *Lispy  = mpc_new("lispy");
 
@@ -423,7 +547,7 @@ main(int ArgCount, char *Arguments[])
 
         mpca_lang(MPCA_LANG_DEFAULT,
                   FileBuffer->Start,
-                  Number, Symbol, Sexpr, Expr, Lispy);
+                  Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
 
         puts("Lispy Version 0.0.1");
         puts("Press Ctrl+c to exit\n");
@@ -450,7 +574,7 @@ main(int ArgCount, char *Arguments[])
                 free(Input);
         }
 
-        mpc_cleanup(4, Number, Symbol, Sexpr, Expr, Lispy);
+        mpc_cleanup(4, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
 
         return(0);
 }
