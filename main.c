@@ -8,28 +8,45 @@
 #include "gs.h"
 #include "mpc.h"
 
-#define LASSERT(Args, Condition, Error) \
-        if(!(Condition)) \
-        { \
-                LvalFree(Args); \
-                return(LvalError(Error)); \
+#define LASSERT(Args, Condition, Error)         \
+        if(!(Condition))                        \
+        {                                       \
+                LvalFree(Args);                 \
+                return(LvalError(Error));       \
         }
 
-typedef struct lval
+struct lval;
+struct lenv;
+typedef struct lval lval;
+typedef struct lenv lenv;
+typedef lval *(*lbuiltin)(lenv *, lval *);
+
+/******************************************************************************
+ * lval Type and Functions
+ ******************************************************************************/
+
+struct lval
 {
+        /* Type of value. */
         int Type;
+
+        /* Value for given type. Think of as union. */
         long Number;
         char *Error;
         char *Symbol;
+        lbuiltin Function;
+
+        /* If this is an S/Q-Expression, then track the cells. */
         unsigned int CellCount;
         struct lval **Cell;
-} lval;
+};
 
 enum lval_type_e
 {
         LVAL_TYPE_NUMBER,
         LVAL_TYPE_ERROR,
         LVAL_TYPE_SYMBOL,
+        LVAL_TYPE_FUNCTION,
         LVAL_TYPE_SEXPRESSION,
         LVAL_TYPE_QEXPRESSION
 };
@@ -75,6 +92,15 @@ LvalSymbol(char *Symbol)
 }
 
 lval *
+LvalFunction(lbuiltin Function)
+{
+        lval *Self = malloc(sizeof(lval));
+        Self->Type = LVAL_TYPE_FUNCTION;
+        Self->Function = Function;
+        return(Self);
+}
+
+lval *
 LvalSExpression()
 {
         lval *Self = malloc(sizeof(lval));
@@ -99,15 +125,10 @@ LvalFree(lval *Self)
 {
         switch(Self->Type)
         {
-                case LVAL_TYPE_NUMBER: break;
-                case LVAL_TYPE_ERROR:
-                {
-                        free(Self->Error);
-                } break;
-                case LVAL_TYPE_SYMBOL:
-                {
-                        free(Self->Symbol);
-                } break;
+                case LVAL_TYPE_FUNCTION:                            break;
+                case LVAL_TYPE_NUMBER:                              break;
+                case LVAL_TYPE_ERROR:       { free(Self->Error);  } break;
+                case LVAL_TYPE_SYMBOL:      { free(Self->Symbol); } break;
                 case LVAL_TYPE_QEXPRESSION:
                 case LVAL_TYPE_SEXPRESSION:
                 {
@@ -119,6 +140,54 @@ LvalFree(lval *Self)
                 } break;
         }
         free(Self);
+}
+
+lval *
+LvalCopy(lval *Self)
+{
+        lval *Result = malloc(sizeof(lval));
+        Result->Type = Self->Type;
+
+        switch(Self->Type)
+        {
+                case(LVAL_TYPE_FUNCTION):
+                {
+                        Result->Function = Self->Function;
+                        break;
+                }
+                case(LVAL_TYPE_NUMBER):
+                {
+                        Result->Number = Self->Number;
+                        break;
+                }
+                case(LVAL_TYPE_ERROR):
+                {
+                        unsigned int StringLength = GSStringLength(Self->Error);
+                        Result->Error = malloc(StringLength + 1);
+                        GSStringCopy(Self->Error, Result->Error, StringLength);
+                        break;
+                }
+                case(LVAL_TYPE_SYMBOL):
+                {
+                        unsigned int StringLength = GSStringLength(Self->Symbol);
+                        Result->Symbol = malloc(StringLength + 1);
+                        GSStringCopy(Self->Symbol, Result->Symbol, StringLength);
+                        break;
+                }
+                case(LVAL_TYPE_SEXPRESSION):
+                case(LVAL_TYPE_QEXPRESSION):
+                {
+                        Result->CellCount = Self->CellCount;
+                        Result->Cell = malloc(sizeof(lval *) * Self->CellCount);
+                        for(int Index = 0; Index < Self->CellCount; Index++)
+                        {
+                                Result->Cell[Index] = LvalCopy(Self->Cell[Index]);
+                        }
+                        break;
+                }
+        }
+
+        return(Result);
 }
 
 lval *
@@ -166,7 +235,7 @@ LvalRead(mpc_ast_t *Tree)
                 if(GSStringIsEqual(Tree->children[I]->contents, ")", 1)) continue;
                 if(GSStringIsEqual(Tree->children[I]->contents, "}", 1)) continue;
                 if(GSStringIsEqual(Tree->children[I]->contents, "{", 1)) continue;
-                if(GSStringIsEqual(Tree->children[I]->tag, "regex", 5)) continue;
+                if(GSStringIsEqual(Tree->children[I]->tag, "regex", 5))  continue;
                 Result = LvalAdd(Result, LvalRead(Tree->children[I]));
         }
 
@@ -198,6 +267,7 @@ LvalPrint(lval *Self)
 {
         switch(Self->Type)
         {
+                case(LVAL_TYPE_FUNCTION):    printf("<function>");                break;
                 case(LVAL_TYPE_NUMBER):      printf("%li", Self->Number);         break;
                 case(LVAL_TYPE_ERROR):       printf("Error: %s", Self->Error);    break;
                 case(LVAL_TYPE_SYMBOL):      printf("%s", Self->Symbol);          break;
@@ -235,8 +305,127 @@ LvalTake(lval *Self, unsigned int Index)
         return(Result);
 }
 
+/******************************************************************************
+ * lenv Type and Functions
+ ******************************************************************************/
+
+struct lenv
+{
+        unsigned int Count;
+        char **Symbols;
+        lval **Values;
+};
+
+lenv *
+LenvNew(void)
+{
+        lenv *Result = malloc(sizeof(lenv));
+        Result->Count = 0;
+        Result->Symbols = GSNullPtr;
+        Result->Values = GSNullPtr;
+        return(Result);
+}
+
+void
+LenvFree(lenv *Self)
+{
+        for(int Index = 0; Index < Self->Count; Index++)
+        {
+                free(Self->Symbols[Index]);
+                LvalFree(Self->Values[Index]);
+        }
+        free(Self->Symbols);
+        free(Self->Values);
+        free(Self);
+}
+
 lval *
-LvalBuiltInOperator(lval *Self, char *Operator)
+LenvGet(lenv *Self, lval *Key)
+{
+        lval *Result = GSNullPtr;
+
+        for(int Index = 0; Index < Self->Count; Index++)
+        {
+                char *Symbol = Self->Symbols[Index];
+                unsigned int StringLength = GSStringLength(Symbol);
+                if(GSStringIsEqual(Symbol, Key->Symbol, StringLength))
+                {
+                        Result = LvalCopy(Self->Values[Index]);
+                        return(Result);
+                }
+        }
+
+        Result = LvalError("Unbound Symbol!");
+        return(Result);
+}
+
+void
+LenvPut(lenv *Self, lval *Key, lval *Value)
+{
+        for(int Index = 0; Index < Self->Count; Index++)
+        {
+                char *Symbol = Self->Symbols[Index];
+                unsigned int StringLength = GSStringLength(Symbol);
+                if(GSStringIsEqual(Symbol, Key->Symbol, StringLength))
+                {
+                        LvalFree(Self->Values[Index]);
+                        Self->Values[Index] = LvalCopy(Key);
+                        return;
+                }
+        }
+
+        Self->Count++;
+        Self->Values = realloc(Self->Values, sizeof(lval *) * Self->Count);
+        Self->Symbols = realloc(Self->Symbols, sizeof(char *) * Self->Count);
+
+        Self->Values[Self->Count-1] = LvalCopy(Value);
+        unsigned int StringLength = GSStringLength(Key->Symbol);
+        Self->Symbols[Self->Count-1] = malloc(StringLength + 1);
+        GSStringCopy(Key->Symbol, Self->Symbols[Self->Count-1], StringLength);
+}
+
+void
+LenvAddBuiltIn(lenv *Env, char *Name, lbuiltin Function)
+{
+        lval *Key = LvalSymbol(Name);
+        lval *Value = LvalFunction(Function);
+        LenvPut(Env, Key, Value);
+        LvalFree(Key);
+        LvalFree(Value);
+}
+
+lval *BuiltInList(lenv *Env, lval *Value);
+lval *BuiltInHead(lenv *Env, lval *Value);
+lval *BuiltInTail(lenv *Env, lval *Value);
+lval *BuiltInEval(lenv *Env, lval *Value);
+lval *BuiltInJoin(lenv *Env, lval *Value);
+lval *BuiltInAdd(lenv *Env, lval *Value);
+lval *BuiltInSubtract(lenv *Env, lval *Value);
+lval *BuiltInMultiply(lenv *Env, lval *Value);
+lval *BuiltInDivide(lenv *Env, lval *Value);
+
+void
+LenvAddBuiltIns(lenv *Env)
+{
+        /* List Functions */
+        LenvAddBuiltIn(Env, "list", BuiltInList);
+        LenvAddBuiltIn(Env, "head", BuiltInHead);
+        LenvAddBuiltIn(Env, "tail", BuiltInTail);
+        LenvAddBuiltIn(Env, "eval", BuiltInEval);
+        LenvAddBuiltIn(Env, "join", BuiltInJoin);
+
+        /* Math Functions */
+        LenvAddBuiltIn(Env, "+", BuiltInAdd);
+        LenvAddBuiltIn(Env, "-", BuiltInSubtract);
+        LenvAddBuiltIn(Env, "*", BuiltInMultiply);
+        LenvAddBuiltIn(Env, "/", BuiltInDivide);
+}
+
+/******************************************************************************
+ ******************************************************************************/
+
+lval *
+BuiltInOperator(lenv *Env, lval *Self, char *Operator)
 {
         lval *Result = GSNullPtr;
 
@@ -287,7 +476,35 @@ LvalBuiltInOperator(lval *Self, char *Operator)
 }
 
 lval *
-LvalBuiltInHead(lval *Self)
+BuiltInAdd(lenv *Env, lval *Value)
+{
+        lval *Result = BuiltInOperator(Env, Value, "+");
+        return(Result);
+}
+
+lval *
+BuiltInSubtract(lenv *Env, lval *Value)
+{
+        lval *Result = BuiltInOperator(Env, Value, "-");
+        return(Result);
+}
+
+lval *
+BuiltInMultiply(lenv *Env, lval *Value)
+{
+        lval *Result = BuiltInOperator(Env, Value, "*");
+        return(Result);
+}
+
+lval *
+BuiltInDivide(lenv *Env, lval *Value)
+{
+        lval *Result = BuiltInOperator(Env, Value, "/");
+        return(Result);
+}
+
+lval *
+BuiltInHead(lenv *Env, lval *Self)
 {
         LASSERT(Self, Self->CellCount == 1,
                 "Function 'head' passed too many arguments!");
@@ -306,7 +523,7 @@ LvalBuiltInHead(lval *Self)
 }
 
 lval *
-LvalBuiltInTail(lval *Self)
+BuiltInTail(lenv *Env, lval *Self)
 {
         LASSERT(Self, Self->CellCount == 1,
                 "Function 'tail' passed too many arguments!");
@@ -321,16 +538,16 @@ LvalBuiltInTail(lval *Self)
 }
 
 lval *
-LvalBuiltInList(lval *Self)
+BuiltInList(lenv *Env, lval *Self)
 {
         Self->Type = LVAL_TYPE_QEXPRESSION;
         return(Self);
 }
 
-lval *LvalEval(lval *Self);
+lval *LispEval(lenv *Env, lval *Self);
 
 lval *
-LvalBuiltInEval(lval *Self)
+BuiltInEval(lenv *Env, lval *Self)
 {
         LASSERT(Self, Self->CellCount == 1,
                 "Function 'eval' passed too many arguments!");
@@ -339,11 +556,11 @@ LvalBuiltInEval(lval *Self)
 
         lval *Result = LvalTake(Self, 0);
         Result->Type = LVAL_TYPE_SEXPRESSION;
-        return(LvalEval(Result));
+        return(LispEval(Env, Result));
 }
 
 lval *
-LvalJoin(lval *Left, lval *Right)
+BuiltInJoin__(lval *Left, lval *Right)
 {
         while(Right->CellCount)
         {
@@ -355,7 +572,7 @@ LvalJoin(lval *Left, lval *Right)
 }
 
 lval *
-LvalBuiltInJoin(lval *Self)
+BuiltInJoin(lenv *Env, lval *Self)
 {
         for(int Cell = 0; Cell < Self->CellCount; Cell++)
         {
@@ -367,7 +584,7 @@ LvalBuiltInJoin(lval *Self)
 
         while(Self->CellCount)
         {
-                Result = LvalJoin(Result, LvalPop(Self, 0));
+                Result = BuiltInJoin__(Result, LvalPop(Self, 0));
         }
 
         LvalFree(Self);
@@ -375,14 +592,14 @@ LvalBuiltInJoin(lval *Self)
 }
 
 lval *
-LvalBuiltIn(lval *Self, char *Function)
+BuiltIn(lenv *Env, lval *Self, char *Function)
 {
-        if(GSStringIsEqual(Function, "list", 4)) return(LvalBuiltInList(Self));
-        if(GSStringIsEqual(Function, "head", 4)) return(LvalBuiltInHead(Self));
-        if(GSStringIsEqual(Function, "tail", 4)) return(LvalBuiltInTail(Self));
-        if(GSStringIsEqual(Function, "join", 4)) return(LvalBuiltInJoin(Self));
-        if(GSStringIsEqual(Function, "eval", 4)) return(LvalBuiltInEval(Self));
-        if(GSStringHasSubstring("+-/*", 4, Function, 1)) return(LvalBuiltInOperator(Self, Function));
+        if(GSStringIsEqual(Function, "list", 4)) return(BuiltInList(Env, Self));
+        if(GSStringIsEqual(Function, "head", 4)) return(BuiltInHead(Env, Self));
+        if(GSStringIsEqual(Function, "tail", 4)) return(BuiltInTail(Env, Self));
+        if(GSStringIsEqual(Function, "join", 4)) return(BuiltInJoin(Env, Self));
+        if(GSStringIsEqual(Function, "eval", 4)) return(BuiltInEval(Env, Self));
+        if(GSStringHasSubstring("+-/*", 4, Function, 1)) return(BuiltInOperator(Env, Self, Function));
 
         LvalFree(Self);
 
@@ -391,14 +608,14 @@ LvalBuiltIn(lval *Self, char *Function)
 }
 
 lval *
-LvalEvalSExpression(lval *Self)
+LispEvalSExpression(lenv *Env, lval *Self)
 {
         lval *Result = GSNullPtr;
 
         /* Evaluate all children. */
         for(int Cell = 0; Cell < Self->CellCount; Cell++)
         {
-                Self->Cell[Cell] = LvalEval(Self->Cell[Cell]);
+                Self->Cell[Cell] = LispEval(Env, Self->Cell[Cell]);
         }
 
         /* Check for errors. */
@@ -423,31 +640,40 @@ LvalEvalSExpression(lval *Self)
 
         /* Ensure first element is a symbol. */
         lval *FirstElement = LvalPop(Self, 0);
-        if(FirstElement->Type != LVAL_TYPE_SYMBOL)
+        if(FirstElement->Type != LVAL_TYPE_FUNCTION)
         {
-                LvalFree(FirstElement);
                 LvalFree(Self);
-                Result = LvalError("S-Expression does not start with a symbol!");
+                LvalFree(FirstElement);
+                Result = LvalError("First element is not a function!");
                 return(Result);
         }
 
-        Result = LvalBuiltIn(Self, FirstElement->Symbol);
+        Result = FirstElement->Function(Env, Self);
         LvalFree(FirstElement);
         return(Result);
 }
 
 lval *
-LvalEval(lval *Self)
+LispEval(lenv *Env, lval *Value)
 {
         lval *Result = GSNullPtr;
 
-        if(Self->Type == LVAL_TYPE_SEXPRESSION)
+        if(Value->Type == LVAL_TYPE_SYMBOL)
         {
-                Result = LvalEvalSExpression(Self);
+                Result = LenvGet(Env, Value);
+                LvalFree(Value);
+                return(Result);
         }
+        else if(Value->Type == LVAL_TYPE_SEXPRESSION)
+        {
+                Result = LispEvalSExpression(Env, Value);
+                return(Result);
+        }
+        /* TODO(AARON): Delete the following case? */
         else
         {
-                Result = Self;
+                Result = Value;
+                return(Result);
         }
 
         return(Result);
@@ -555,6 +781,8 @@ main(int ArgCount, char *Arguments[])
         puts("Press Ctrl+c to exit\n");
 
         mpc_result_t *MpcResult = alloca(sizeof(mpc_result_t));
+        lenv *Env = LenvNew();
+        LenvAddBuiltIns(Env);
 
         while(true)
         {
@@ -563,7 +791,7 @@ main(int ArgCount, char *Arguments[])
                 if(mpc_parse("<stdin>", Input, Lispy, MpcResult))
                 {
                         lval *Result = LvalRead(MpcResult->output);
-                        Result = LvalEval(Result);
+                        Result = LispEval(Env, Result);
                         LvalPrintLine(Result);
                         LvalFree(Result);
                         mpc_ast_delete(MpcResult->output);
@@ -576,6 +804,7 @@ main(int ArgCount, char *Arguments[])
                 free(Input);
         }
 
+        LenvFree(Env);
         mpc_cleanup(4, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
 
         return(0);
