@@ -1,7 +1,7 @@
 /******************************************************************************
  * File: gs.h
  * Created: 2016-07-14
- * Last Updated: 2016-08-23
+ * Last Updated: 2016-09-20
  * Creator: Aaron Oman (a.k.a GrooveStomp)
  * Notice: (C) Copyright 2016 by Aaron Oman
  *-----------------------------------------------------------------------------
@@ -14,10 +14,11 @@
 #define GS_VERSION 0.3.0
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h> /* memset */
+#include <stdlib.h> /* size_t */
 #include <stdarg.h> /* va_list */
 #include <libgen.h> /* basename */
+
+void * GSMemorySet(void *D, char ToFill, size_t NumBytes);
 
 #define GSArraySize(Array) (sizeof((Array)) / sizeof((Array)[0]))
 
@@ -50,9 +51,9 @@
 
 #define GSAbortWithMessage(...) \
         { \
-                char String##__LINE__[256];                             \
+                char String##__LINE__[256]; \
                 sprintf(String##__LINE__, "In %s() at line #%i: ", __func__, __LINE__); \
-                fprintf(stderr, "%s", String##__LINE__);                 \
+                fprintf(stderr, "%s", String##__LINE__); \
                 fprintf(stderr, __VA_ARGS__); \
                 exit(EXIT_FAILURE); \
         }
@@ -61,6 +62,11 @@
 #define GSBytesToKilobytes(X) (X) * GS1024Inverse
 #define GSBytesToMegabytes(X) GSBytesToKilobytes((X)) * GS1024Inverse
 #define GSBytesToGigabytes(X) GSBytesToMegabytes((X)) * GS1024Inverse
+
+#define GSBytes(X) (X)
+#define GSKilobytesToBytes(X) GSBytes((X)) * 1024
+#define GSMegabytesToBytes(X) GSKilobytesToBytes((X)) * 1024
+#define GSGigabytesToBytes(X) GSMegabytesToBytes((X)) * 1024
 
 #define GSNullChar '\0'
 #define GSNullPtr NULL
@@ -232,6 +238,37 @@ GSStringLength(char *String)
 	char *P = String;
 	while(*P != '\0') P++;
 	return(P - String);
+}
+
+int
+GSStringSubstringIndex(char *Haystack, unsigned int HaystackLength, char *Needle, unsigned int MaxNumToMatch)
+{
+        if(HaystackLength == 0)
+                HaystackLength = GSStringLength(Haystack);
+        if(MaxNumToMatch == 0)
+                MaxNumToMatch = GSStringLength(Needle);
+
+        for(int Index = 0; Index < HaystackLength; Index++)
+        {
+                int NumToMatch = GSMin(HaystackLength - Index, MaxNumToMatch);
+                if(GSStringIsEqual(Haystack + Index, Needle, NumToMatch))
+                        return(Index);
+        }
+
+        return(-1);
+}
+
+gs_bool
+GSStringHasSubstring(char *Haystack, unsigned int HaystackLength, char *Needle, unsigned int MaxNumToMatch)
+{
+        if(HaystackLength == 0)
+                HaystackLength = GSStringLength(Haystack);
+        if(MaxNumToMatch == 0)
+                MaxNumToMatch = GSStringLength(Needle);
+
+        int Index = GSStringSubstringIndex(Haystack, HaystackLength, Needle, MaxNumToMatch);
+        gs_bool Result = Index > -1;
+        return(Result);
 }
 
 gs_bool
@@ -527,10 +564,10 @@ GSHashMapInit(void *Memory, unsigned int MaxKeyLength, unsigned int NumEntries)
         int KeysMemLength = MaxKeyLength * NumEntries;
 
         Self->Keys = KeyValueMemory;
-        memset(Self->Keys, 0, KeysMemLength);
+        GSMemorySet(Self->Keys, 0, KeysMemLength);
 
         Self->Values = (void **)(Self->Keys + KeysMemLength);
-        memset(Self->Values, 0, (sizeof(void **) * NumEntries));
+        GSMemorySet(Self->Values, 0, (sizeof(void **) * NumEntries));
 
         return(Self);
 }
@@ -647,6 +684,11 @@ GSHashMapGrow(gs_hash_map **Self, unsigned int NumEntries, void *New)
         /* No point in making smaller... */
         if(NumEntries <= Old->Capacity) return(false);
         if(New == NULL) return(false);
+
+        char *LowerBound = (char *)Old;
+        char *UpperBound = LowerBound + Old->Capacity;
+        if(New >= (void *)LowerBound && New <= (void *)UpperBound)
+                GSAbortWithMessage("GSHashMapGrow forbids overlapping memory.");
 
         *Self = GSHashMapInit(New, Old->MaxKeyLength, NumEntries);
         for(int I=0; I<Old->Capacity; I++)
@@ -918,6 +960,53 @@ GSFileCopyToBuffer(char *FileName, gs_buffer *Buffer)
         *(Buffer->Cursor) = '\0';
 
         return(true);
+}
+
+/******************************************************************************
+ * Memory operations.
+ ******************************************************************************/
+
+void * /* Behaves like memmove. */
+GSMemoryCopy(void *S, void *D, size_t NumBytes)
+{
+        char *Source = (char *)S;
+        char *Destination = (char *)D;
+
+        if(Source == Destination)
+        {
+                return(S);
+        }
+        else if(Source < Destination)
+        {
+                for(int Index = NumBytes - 1; Index >= 0; Index--)
+                {
+                        Destination[Index] = Source[Index];
+                }
+                return(D);
+        }
+        else
+        {
+                for(int Index = 0; Index < NumBytes; Index++)
+                {
+                        Destination[Index] = Source[Index];
+                }
+                return(D);
+        }
+
+        return(GSNullPtr);
+}
+
+void *
+GSMemorySet(void *D, char ToFill, size_t NumBytes)
+{
+        char *Destination = (char *)D;
+
+        for(int Index = 0; Index < NumBytes; Index++)
+        {
+                *Destination = ToFill;
+        }
+
+        return(D);
 }
 
 #endif /* GS_VERSION */

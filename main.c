@@ -153,12 +153,12 @@ LvalRead(mpc_ast_t *Tree)
 {
         lval *Result = GSNullPtr;
 
-        if(strstr(Tree->tag, "number")) return(LvalReadNumber(Tree));
-        if(strstr(Tree->tag, "symbol")) return(LvalSymbol(Tree->contents));
+        if(GSStringHasSubstring(Tree->tag, 0, "number", 6)) return(LvalReadNumber(Tree));
+        if(GSStringHasSubstring(Tree->tag, 0, "symbol", 6)) return(LvalSymbol(Tree->contents));
 
-        if(GSStringIsEqual(Tree->tag, ">", 1)) Result = LvalSExpression();
-        if(strstr(Tree->tag, "sexpr"))         Result = LvalSExpression();
-        if(strstr(Tree->tag, "qexpr"))         Result = LvalQExpression();
+        if(GSStringIsEqual(Tree->tag, ">", 1))             Result = LvalSExpression();
+        if(GSStringHasSubstring(Tree->tag, 0, "sexpr", 5)) Result = LvalSExpression();
+        if(GSStringHasSubstring(Tree->tag, 0, "qexpr", 5)) Result = LvalQExpression();
 
         for(int I=0; I<Tree->children_num; I++)
         {
@@ -218,8 +218,8 @@ LvalPop(lval *Self, unsigned int Index)
 {
         lval *Result = Self->Cell[Index];
 
-        memmove(&(Self->Cell[Index]), &(Self->Cell[Index + 1]),
-                sizeof(lval *) * (Self->CellCount - Index - 1));
+        GSMemoryCopy(&(Self->Cell[Index + 1]), &(Self->Cell[Index]),
+                     sizeof(lval *) * (Self->CellCount - Index - 1));
 
         Self->CellCount--;
 
@@ -382,7 +382,7 @@ LvalBuiltIn(lval *Self, char *Function)
         if(GSStringIsEqual(Function, "tail", 4)) return(LvalBuiltInTail(Self));
         if(GSStringIsEqual(Function, "join", 4)) return(LvalBuiltInJoin(Self));
         if(GSStringIsEqual(Function, "eval", 4)) return(LvalBuiltInEval(Self));
-        if(strstr("+-/*", Function)) return(LvalBuiltInOperator(Self, Function));
+        if(GSStringHasSubstring("+-/*", 4, Function, 1)) return(LvalBuiltInOperator(Self, Function));
 
         LvalFree(Self);
 
@@ -487,7 +487,9 @@ Eval(mpc_ast_t *Tree)
 {
         lval *Result;
 
-        if(strstr(Tree->tag, "number"))
+        char *Tag = Tree->tag;
+        unsigned int TagLength = GSStringLength(Tag);
+        if(GSStringHasSubstring(Tag, GSStringLength(Tag), "number", GSMin(TagLength, 6)))
         {
                 errno = 0;
                 long Number = strtol(Tree->contents, NULL, 10);
@@ -507,7 +509,7 @@ Eval(mpc_ast_t *Tree)
         lval *Parameter = Eval(Tree->children[2]);
 
         int i = 3;
-        while(strstr(Tree->children[i]->tag, "expr"))
+        while(GSStringHasSubstring(Tree->children[i]->tag, 0, "expr", 4))
         {
                 Parameter = EvalOperator(Parameter, Operator, Eval(Tree->children[i]));
                 i++;
